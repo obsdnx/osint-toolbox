@@ -857,6 +857,151 @@ async function runProfile(targetEl) {
   wireChips(targetEl);
 }
 
+/* ------------------------------------------------ deep footprint (SSE) */
+
+function runFootprint(targetEl) {
+  return new Promise(resolve => {
+    const name = document.getElementById('fp-name').value.trim();
+    const city = document.getElementById('fp-city').value.trim();
+    const usernames = document.getElementById('fp-usernames').value.trim();
+    const email = document.getElementById('fp-email').value.trim();
+    const phone = document.getElementById('fp-phone').value.trim();
+    const term = makeTerm(targetEl);
+    document.getElementById('graph-wrap') && document.getElementById('graph-wrap').classList.add('hidden');
+
+    if (!name && !usernames && !email && !phone) { term.line('[!] enter at least one identifier', 'bad'); return resolve(); }
+    header(term, 'MAPPING DIGITAL FOOTPRINT');
+    term.line('[*] running every source, then fetching & scraping the pages they surface...', 'dim');
+    const log = term.line('', 'info');
+
+    const qs = new URLSearchParams({ name, city, email, phone, usernames });
+    const es = new EventSource('/api/footprint/stream?' + qs.toString());
+    let liveAccounts = 0, liveScraped = 0;
+
+    es.onmessage = ev => {
+      const m = JSON.parse(ev.data);
+      if (m.type === 'phase') {
+        term.line(`\n▶ ${esc(m.label)}`, 'section-h');
+      } else if (m.type === 'account') {
+        liveAccounts++;
+        const extra = [m.realName, m.location].filter(Boolean).join(' · ');
+        term.line(`  [+] ${esc(m.platform).padEnd(18)} ${link(m.url)}${extra ? ` <span class="info">${esc(extra)}</span>` : ''}`, 'bad');
+      } else if (m.type === 'email') {
+        if (m.breaches) term.line(`  [!] ${m.breaches} breach(es) via ${esc(m.breachSource || '')}${m.risk ? ` — risk: ${esc(m.risk.label)} (${m.risk.score}/100)` : ''}`, 'bad');
+        if (m.domainIntel) term.line(`  [i] mail: ${esc(m.domainIntel.provider || m.domainIntel.mx[0] || 'unknown')} · SPF ${m.domainIntel.spf ? '✓' : '✗'} · DMARC ${m.domainIntel.dmarc ? '✓' : '✗'}`, 'dim');
+      } else if (m.type === 'scraped') {
+        liveScraped++;
+        const hit = (m.emails || 0) + (m.phones || 0) + (m.socials || 0);
+        term.line(`  [~] scraped ${esc(hostname(m.url)).padEnd(24)} ${hit ? `<span class="warn">extracted ${m.emails}✉ ${m.phones}☎ ${m.socials}🔗</span>` : '<span class="dim">no entities</span>'}`, 'dim');
+      } else if (m.type === 'records') {
+        renderRecords(term, m.records, m.web);
+      } else if (m.type === 'error') {
+        term.line(`  [!] ${esc(m.message)}`, 'bad');
+      } else if (m.type === 'done') {
+        es.close();
+        renderFootprint(term, m.footprint);
+        state.lastFootprint = m.footprint;
+        resolve(m.footprint);
+      }
+    };
+    es.onerror = () => { es.close(); term.line('[!] stream lost — is the server running?', 'bad'); resolve(null); };
+  });
+}
+
+function hostname(url) { try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return url.slice(0, 30); } }
+
+function renderRecords(term, records, web) {
+  if (records) {
+    if (records.sec && records.sec.length) {
+      term.line(`  [SEC EDGAR] ${records.sec.length} corporate/financial filing(s):`, 'warn');
+      records.sec.forEach(f => term.line(`    ▸ ${esc(f.title)} — ${esc(f.detail)} ${link(f.url, 'view')}`, 'dim'));
+    }
+    if (records.courts && records.courts.count) {
+      term.line(`  [COURT RECORDS] ${records.courts.count} case(s) match (CourtListener):`, 'warn');
+      records.courts.items.forEach(c => term.line(`    ▸ ${esc(c.title)} — ${esc(c.detail)} ${link(c.url, 'view')}`, 'dim'));
+    }
+    if (records.business && records.business.length) {
+      term.line(`  [BUSINESS FILINGS]`, 'warn');
+      records.business.forEach(b => term.line(`    ▸ ${esc(b.title)} ${link(b.url, 'view')}`, 'dim'));
+    }
+    if (records.government && records.government.length) {
+      term.line(`  [GOV / PROPERTY / VOTER]`, 'warn');
+      records.government.forEach(g => term.line(`    ▸ ${esc(g.title)}${g.snippet ? ` — <span class="dim">${esc(g.snippet.slice(0, 100))}</span>` : ''}`, 'warn'));
+    }
+  }
+  if (web && web.length) {
+    web.forEach(g => {
+      if (!g.results.length) return;
+      term.line(`  [${esc(g.label.toUpperCase())}]`, 'warn');
+      g.results.forEach(r => term.line(`    ▸ ${esc(r.title)}${r.snippet ? ` — <span class="dim">${esc(r.snippet.slice(0, 110))}</span>` : ''}`, 'dim'));
+    });
+  }
+}
+
+function renderFootprint(term, f) {
+  term.line(`\n╔══════════════════════════════════════════════╗`, 'ok');
+  term.line(`║  CONSOLIDATED FOOTPRINT DOSSIER               ║`, 'ok');
+  term.line(`╚══════════════════════════════════════════════╝`, 'ok');
+  term.line(`  ${f.stats.sourcesChecked} sources checked · ${f.stats.accountsFound} accounts · ${f.stats.pagesScraped} pages scraped · ${f.stats.entities} distinct data points\n`, 'dim');
+
+  const idBlock = (label, arr, cls) => {
+    if (!arr || !arr.length) return;
+    term.line(`[ ${label} ]`, 'section-h');
+    arr.forEach(x => {
+      const conf = x.sources.length > 1 ? `<span class="badge v">×${x.sources.length} sources</span>` : '';
+      term.line(`  ▸ ${esc(x.value)} ${conf} <span class="dim">${esc(x.sources.slice(0, 3).join(', '))}${x.sources.length > 3 ? '…' : ''}</span>`, cls);
+    });
+  };
+  idBlock('REAL NAMES', f.identity.names, 'bad');
+  idBlock('LOCATIONS', f.identity.locations, 'bad');
+  idBlock('EMAIL ADDRESSES', f.identity.emails, 'warn');
+  idBlock('PHONE NUMBERS', f.identity.phones, 'warn');
+
+  if (f.breaches && f.breaches.length) {
+    term.line(`\n[ BREACHES — ${f.breaches.length} (${esc(f.breachSource || '')}) ]`, 'section-h');
+    f.breaches.slice(0, 12).forEach(b =>
+      term.line(`  ✗ ${esc(b.name)}${b.date ? ` (${esc(b.date)})` : ''}${(b.dataClasses || []).length ? ` — ${esc((b.dataClasses || []).slice(0, 5).join(', '))}` : ''}`, 'bad'));
+    if (f.breaches.length > 12) term.line(`  …and ${f.breaches.length - 12} more`, 'dim');
+  }
+
+  if (f.accounts && f.accounts.length) {
+    term.line(`\n[ CONFIRMED ACCOUNTS: ${f.accounts.length} ]`, 'section-h');
+    f.accounts.forEach(a => term.line(`  [+] ${esc(a.platform).padEnd(18)} ${link(a.url)}${a.realName ? ` <span class="info">${esc(a.realName)}</span>` : ''}`, 'bad'));
+  }
+
+  if (f.links && f.links.length) {
+    term.line(`\n[ LINKED / DISCOVERED PROFILES: ${f.links.length} ]`, 'section-h');
+    f.links.slice(0, 25).forEach(l => term.line(`  → ${link(l.url)} <span class="dim">(via ${esc(l.via.slice(0, 2).join(', '))})</span>`, 'warn'));
+  }
+
+  if (f.pivots && f.pivots.length) {
+    term.line(`\n[ PIVOTS — new leads to scan ]`, 'section-h');
+    term.raw(`<span class="line">${f.pivots.map(p => `<span class="chip" data-scan-user="${esc(p.value)}">${esc(p.value)}</span>`).join('')}</span>`);
+  }
+
+  term.line(`\n[✓] footprint mapped. this is a subset of what's public — brokers & logged-in platforms hold more.`, 'ok');
+  const exp = term.raw(`<span class="line"><span class="chip" id="fp-export">⧉ EXPORT DOSSIER</span></span>`);
+  exp.querySelector('#fp-export').addEventListener('click', () => exportFootprint(f));
+  wireChips(term.el);
+}
+
+function exportFootprint(f) {
+  const rows = [`<h1>DIGITAL FOOTPRINT DOSSIER</h1><p class="meta">generated ${new Date().toLocaleString()} · ${f.stats.sourcesChecked} sources · ${f.stats.pagesScraped} pages scraped</p>`];
+  const sec = (t, arr, fmt) => { if (arr && arr.length) { rows.push(`<h2>${t}</h2><ul>`); arr.forEach(x => rows.push(`<li>${fmt(x)}</li>`)); rows.push('</ul>'); } };
+  sec('Real names', f.identity.names, x => `${x.value} (${x.sources.length} sources)`);
+  sec('Locations', f.identity.locations, x => `${x.value} (${x.sources.length} sources)`);
+  sec('Emails', f.identity.emails, x => x.value);
+  sec('Phones', f.identity.phones, x => x.value);
+  sec('Breaches', f.breaches, b => `${b.name} — ${(b.dataClasses || []).join(', ')}`);
+  sec('Accounts', f.accounts, a => `${a.platform}: ${a.url}`);
+  sec('Linked profiles', f.links, l => l.url);
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>footprint dossier</title>
+<style>body{font-family:Menlo,monospace;background:#050805;color:#00ff41;max-width:820px;margin:40px auto;padding:0 20px}
+h1,h2{border-bottom:1px solid #114411;padding-bottom:4px}.meta{color:#1f7a35}a{color:#00e5ff}@media print{body{background:#fff;color:#000}}</style>
+</head><body>${rows.join('\n')}<p class="meta">FOOTPRINT recon toolbox — self-audit only</p></body></html>`;
+  const w = window.open('', '_blank'); w.document.write(html); w.document.close();
+}
+
 /* -------------------------------------------------------- dossier export */
 
 function exportDossier() {
@@ -925,6 +1070,7 @@ async function runHistory(targetEl) {
 /* --------------------------------------------------------------- wiring */
 
 const RUNNERS = {
+  footprint: () => runFootprint(document.getElementById('footprint-out')),
   email: () => { const v = document.getElementById('email-input').value.trim(); if (v) return runEmail(document.getElementById('email-out'), v); },
   phone: () => { const v = document.getElementById('phone-input').value.trim(); if (v) return runPhone(document.getElementById('phone-out'), v); },
   username: () => {
@@ -996,6 +1142,8 @@ const COMMANDS = {
     document.getElementById('username-full').checked = args.includes('full');
     RUNNERS.username();
   },
+  footprint() { switchTab('footprint'); },
+  fp() { switchTab('footprint'); },
   pw() { switchTab('password'); document.getElementById('password-input').focus(); },
   card(args) { switchTab('card'); if (args[0]) { document.getElementById('card-input').value = args.join(''); RUNNERS.card(); } },
   self() { switchTab('self'); RUNNERS.self(); },

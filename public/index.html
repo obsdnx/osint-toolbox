@@ -29,7 +29,8 @@
 </header>
 
 <nav id="tabs">
-  <button class="tab active" data-tab="email">[ EMAIL ]</button>
+  <button class="tab active" data-tab="footprint">[ ★ FOOTPRINT ]</button>
+  <button class="tab" data-tab="email">[ EMAIL ]</button>
   <button class="tab" data-tab="phone">[ PHONE ]</button>
   <button class="tab" data-tab="username">[ USERNAME ]</button>
   <button class="tab" data-tab="password">[ PASSWORD ]</button>
@@ -39,8 +40,24 @@
 </nav>
 
 <main>
+  <!-- FOOTPRINT (deep aggregate) -->
+  <section id="panel-footprint" class="panel active">
+    <p class="hint">// the big one — enter everything you know about yourself. The engine runs every source, <b>fetches and scrapes the discovered pages</b>,
+      extracts the actual data out of them (emails, phones, names, locations, linked accounts), correlates it, and pivots on what it finds.
+      This is what's genuinely out there about you, in one place.</p>
+    <div class="profile-grid">
+      <label>NAME <input id="fp-name" type="text" placeholder="Jane Doe" autocomplete="off"></label>
+      <label>CITY <input id="fp-city" type="text" placeholder="Dar es Salaam" autocomplete="off"></label>
+      <label>USERNAME(S) <input id="fp-usernames" type="text" placeholder="janedoe, jdoe99 (comma-separated)" autocomplete="off"></label>
+      <label>EMAIL <input id="fp-email" type="email" placeholder="you@example.com" autocomplete="off"></label>
+      <label>PHONE <input id="fp-phone" type="tel" placeholder="+1 555 867 5309" autocomplete="off"></label>
+    </div>
+    <button class="run big" data-run="footprint">▶ MAP MY DIGITAL FOOTPRINT</button>
+    <div id="footprint-out" class="terminal-out"></div>
+  </section>
+
   <!-- EMAIL -->
-  <section id="panel-email" class="panel active">
+  <section id="panel-email" class="panel">
     <div class="prompt-line">
       <span class="ps1">root@footprint:~/email$</span>
       <input id="email-input" type="email" placeholder="you@example.com" autocomplete="off" spellcheck="false">

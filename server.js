@@ -85,26 +85,138 @@ async function probe(url, { method = 'GET', headers = {}, body = null, wantBody 
 // with real titles + snippets — used to reach bot-walled sites (LinkedIn,
 // Facebook, data brokers) *through* the search engine, and to surface what the
 // open web actually says about an identifier.
-async function searchWeb(query, limit = 6) {
-  const r = await probe(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, { wantBody: true, browser: true, timeout: 12000 });
-  if (r.status !== 200 || !r.body) return [];
-  const out = [];
-  const snips = [];
-  const snipRe = /class="result__snippet"[^>]*>(.*?)<\/a>/gs;
-  let sm;
-  while ((sm = snipRe.exec(r.body))) snips.push(stripHtml(sm[1]));
-  const linkRe = /class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)<\/a>/gs;
-  let m, i = 0;
-  while ((m = linkRe.exec(r.body)) && out.length < limit) {
+// --- resilient web search: multiple engines, serialized + cached ---------
+// Search-engine HTML endpoints block bursts, so all searches funnel through a
+// single serialized queue with jitter, results are cached, and if one engine
+// returns nothing we fall back to the next.
+const searchCache = new Map();
+let searchChain = Promise.resolve();
+
+function parseDDG(body, limit) {
+  const out = [], snips = [];
+  let sm; const snipRe = /class="result__snippet"[^>]*>(.*?)<\/a>/gs;
+  while ((sm = snipRe.exec(body))) snips.push(stripHtml(sm[1]));
+  let m, i = 0; const linkRe = /class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)<\/a>/gs;
+  while ((m = linkRe.exec(body)) && out.length < limit) {
     let url = m[1];
     const ud = url.match(/uddg=([^&]+)/);
     if (ud) { try { url = decodeURIComponent(ud[1]); } catch { /* keep */ } }
     if (url.startsWith('//')) url = 'https:' + url;
     const title = stripHtml(m[2]);
-    if (title) out.push({ title, url, snippet: snips[i] || '' });
+    if (title && /^https?:/.test(url)) out.push({ title, url, snippet: snips[i] || '' });
     i++;
   }
   return out;
+}
+
+function parseBing(body, limit) {
+  const out = [];
+  const blockRe = /<li class="b_algo"[\s\S]*?<h2>\s*<a[^>]*href="([^"]+)"[^>]*>(.*?)<\/a>[\s\S]*?(?:<p[^>]*>(.*?)<\/p>)?<\/li>/g;
+  let m;
+  while ((m = blockRe.exec(body)) && out.length < limit) {
+    const url = m[1], title = stripHtml(m[2]);
+    if (title && /^https?:/.test(url)) out.push({ title, url, snippet: stripHtml(m[3] || '') });
+  }
+  return out;
+}
+
+function parseMojeek(body, limit) {
+  const out = [];
+  const re = /<a class="title"[^>]*href="([^"]+)"[^>]*>(.*?)<\/a>/g;
+  let m;
+  while ((m = re.exec(body)) && out.length < limit) {
+    const url = m[1], title = stripHtml(m[2]);
+    if (title && /^https?:/.test(url)) out.push({ title, url, snippet: '' });
+  }
+  return out;
+}
+
+const SEARCH_ENGINES = [
+  { name: 'duckduckgo', url: q => `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`, parse: parseDDG },
+  { name: 'bing', url: q => `https://www.bing.com/search?q=${encodeURIComponent(q)}&count=20`, parse: parseBing },
+  { name: 'mojeek', url: q => `https://www.mojeek.com/search?q=${encodeURIComponent(q)}`, parse: parseMojeek },
+];
+
+async function searchWebNow(query, limit) {
+  for (const eng of SEARCH_ENGINES) {
+    const r = await probe(eng.url(query), { wantBody: true, browser: true, timeout: 12000 });
+    if (r.status === 200 && r.body) {
+      const results = eng.parse(r.body, limit);
+      if (results.length) return results.map(x => ({ ...x, engine: eng.name }));
+    }
+    await new Promise(res => setTimeout(res, 300 + Math.floor((query.length * 37) % 400)));
+  }
+  return [];
+}
+
+function searchWeb(query, limit = 6) {
+  const key = `${limit}:${query}`;
+  if (searchCache.has(key)) return Promise.resolve(searchCache.get(key));
+  searchChain = searchChain.then(async () => {
+    if (searchCache.has(key)) return;
+    const results = await searchWebNow(query, limit);
+    searchCache.set(key, results);
+    await new Promise(res => setTimeout(res, 450)); // spacing between engine hits
+  });
+  return searchChain.then(() => searchCache.get(key) || []);
+}
+
+// --- entity extraction: pull real data out of fetched page content --------
+const RE_EMAIL = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+const RE_PHONE = /(?:\+?\d{1,3}[\s.-]?)?(?:\(\d{3}\)|\d{3})[\s.-]?\d{3}[\s.-]?\d{4}\b/g;
+const RE_HANDLE = /(?:^|[\s(>])@([a-zA-Z0-9._]{3,30})\b/g;
+const SOCIAL_HOSTS = /(?:twitter|x|instagram|facebook|linkedin|github|tiktok|youtube|reddit|mastodon|threads|t\.me|telegram|medium|substack|twitch|pinterest|soundcloud)\.[a-z.]+/i;
+const RE_URL = /https?:\/\/[^\s"'<>)]+/g;
+
+function extractEntities(text, baseUrl) {
+  const clip = text.slice(0, 200000);
+  const emails = new Set(), phones = new Set(), handles = new Set(), socials = new Set();
+  (clip.match(RE_EMAIL) || []).forEach(e => {
+    const low = e.toLowerCase();
+    if (!/\.(png|jpe?g|gif|svg|webp|css|js)$/.test(low) && !low.includes('example.') && !low.startsWith('u003') && low.length < 60) emails.add(low);
+  });
+  (clip.match(RE_PHONE) || []).forEach(p => { const d = p.replace(/\D/g, ''); if (d.length >= 10 && d.length <= 15) phones.add(p.trim()); });
+  let m;
+  RE_HANDLE.lastIndex = 0;
+  while ((m = RE_HANDLE.exec(clip))) handles.add(m[1]);
+  (clip.match(RE_URL) || []).forEach(u => { if (SOCIAL_HOSTS.test(u)) socials.add(u.replace(/[.,)]+$/, '').slice(0, 120)); });
+  return {
+    emails: [...emails].slice(0, 25),
+    phones: [...phones].slice(0, 15),
+    handles: [...handles].slice(0, 25),
+    socials: [...socials].slice(0, 30),
+  };
+}
+
+// Fetch a page (or its underlying JSON endpoint) and pull structured facts +
+// entities out of the real content — not just a link.
+async function scrapePage(url) {
+  const r = await probe(url, { wantBody: true, browser: true, timeout: 9000 });
+  if (r.status !== 200 || !r.body) return { url, ok: false, status: r.status || 0, reason: r.error || `http-${r.status}` };
+  const body = r.body;
+  const meta = (prop) => {
+    const re = new RegExp(`<meta[^>]+(?:property|name)=["']${prop}["'][^>]+content=["']([^"']+)["']`, 'i');
+    const re2 = new RegExp(`<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["']${prop}["']`, 'i');
+    return (body.match(re) || body.match(re2) || [])[1] || null;
+  };
+  const title = (body.match(/<title[^>]*>([^<]+)<\/title>/i) || [])[1] || meta('og:title');
+  const desc = meta('description') || meta('og:description');
+  // JSON-LD structured data often carries name/jobTitle/address/sameAs
+  let jsonld = [];
+  const ldRe = /<script[^>]+application\/ld\+json[^>]*>([\s\S]*?)<\/script>/gi;
+  let lm;
+  while ((lm = ldRe.exec(body)) && jsonld.length < 4) {
+    try { jsonld.push(JSON.parse(lm[1].trim())); } catch { /* skip */ }
+  }
+  const visible = stripHtml(body.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' '));
+  return {
+    url, ok: true, status: 200,
+    title: title ? stripHtml(title) : null,
+    description: desc ? stripHtml(desc) : null,
+    jsonld,
+    entities: extractEntities(body, url),
+    textSample: visible.slice(0, 500),
+  };
 }
 
 // Search-mediated identity recon: reach blocked platforms via `site:` dorks and
@@ -1128,11 +1240,177 @@ function readBody(req) {
 
 const VALID_USERNAME = /^[\w.@-]{1,64}$/;
 
+/* ------------------------------------------------- deep footprint engine --
+ * Orchestrates every source, SCRAPES the discovered pages/endpoints to pull
+ * real data out of them, correlates the extracted entities, and pivots on new
+ * handles/emails it uncovers. Emits progress events for live SSE display.
+ */
+async function deepFootprint(ids, emit, isCancelled) {
+  const cancelled = () => isCancelled && isCancelled();
+  // consolidated stores: value -> Set(sources)
+  const names = new Map(), locations = new Map(), emails = new Map(), phones = new Map();
+  const accounts = [];          // {platform,url,source,realName,location,stats}
+  const links = new Map();      // url -> Set(via)
+  const scraped = [];
+  const pivots = [];
+  const addM = (map, val, src) => { if (!val) return; const k = String(val).trim(); if (!k) return; if (!map.has(k)) map.set(k, new Set()); map.get(k).add(src); };
+  const mapOut = m => [...m.entries()].map(([value, s]) => ({ value, sources: [...s] })).sort((a, b) => b.sources.length - a.sources.length);
+
+  const usernames = (ids.usernames || []).filter(Boolean);
+  if (ids.email) addM(emails, ids.email.toLowerCase(), 'you provided');
+  if (ids.phone) addM(phones, ids.phone, 'you provided');
+  if (ids.name) addM(names, ids.name, 'you provided');
+  if (ids.city) addM(locations, ids.city, 'you provided');
+
+  let sourcesChecked = 0;
+  const scrapeTargets = new Set();
+
+  /* -- phase 1: username sweeps + enrichment -- */
+  emit({ type: 'phase', label: `Scanning ${usernames.length} handle(s) across ${CORE_SITES.length}+ platforms` });
+  for (const u of usernames.slice(0, 4)) {
+    if (cancelled()) return;
+    const units = buildScanUnits('quick');
+    await runPool(units, unit => scanOne(unit, u), 16, r => {
+      sourcesChecked++;
+      if (r.exists !== true) return;
+      const e = r.enrich || {};
+      accounts.push({ platform: r.name, url: r.url, source: `@${u}`, realName: e.realName || null, location: e.location || null, stats: e.stats || null });
+      emit({ type: 'account', platform: r.name, url: r.url, handle: u, realName: e.realName || null, location: e.location || null });
+      addM(names, e.realName, `${r.name} (@${u})`);
+      addM(locations, e.location, `${r.name} (@${u})`);
+      (e.links || []).forEach(l => { if (l.url) { links.set(l.url, (links.get(l.url) || new Set()).add(`${r.name} (@${u})`)); scrapeTargets.add(l.url); } });
+      if (r.url) scrapeTargets.add(r.url);
+    }, cancelled);
+  }
+
+  /* -- phase 2: email recon -- */
+  if (ids.email && !cancelled()) {
+    emit({ type: 'phase', label: `Email recon + breach check: ${ids.email}` });
+    try {
+      const er = await reconEmail(ids.email);
+      sourcesChecked += 3;
+      if (er.profile) {
+        addM(names, er.profile.displayName, 'Gravatar profile');
+        addM(locations, er.profile.location, 'Gravatar profile');
+        (er.profile.accounts || []).forEach(a => { if (a.url) { links.set(a.url, (links.get(a.url) || new Set()).add('Gravatar')); scrapeTargets.add(a.url); } });
+        if (er.profile.username) { pivots.push({ kind: 'username', value: er.profile.username, note: 'from Gravatar — worth a full scan' }); }
+        emit({ type: 'account', platform: 'Gravatar', url: er.profile.profileUrl, handle: ids.email, realName: er.profile.displayName, location: er.profile.location });
+      }
+      (er.webMentions || []).forEach(w => scrapeTargets.add(w.url));
+      emit({ type: 'email', breaches: (er.breaches || []).length, breachSource: er.breachSource, risk: er.breachExtra && er.breachExtra.risk, domainIntel: er.domainIntel, webMentions: er.webMentions });
+      ids._emailResult = er;
+    } catch { /* best effort */ }
+  }
+
+  /* -- phase 3: name + public/government records -- */
+  if (ids.name && !cancelled()) {
+    emit({ type: 'phase', label: `Public web + government records for "${ids.name}"` });
+    try {
+      const [web, records] = await Promise.all([nameRecon(ids.name, ids.city), publicRecords(ids.name, ids.city)]);
+      ids._web = web; ids._records = records;
+      web.forEach(g => g.results.forEach(r => scrapeTargets.add(r.url)));
+      records.government.forEach(r => scrapeTargets.add(r.url));
+      records.business.forEach(r => scrapeTargets.add(r.url));
+      emit({ type: 'records', web, records });
+    } catch { /* best effort */ }
+  }
+
+  /* -- phase 4: SCRAPE discovered pages, extract entities -- */
+  const targets = [...scrapeTargets].filter(u => /^https?:/.test(u)).slice(0, 30);
+  emit({ type: 'phase', label: `Fetching & extracting data from ${targets.length} discovered pages` });
+  await runPool(targets, async url => {
+    if (cancelled()) return null;
+    const page = await scrapePage(url);
+    sourcesChecked++;
+    if (!page.ok) return null;
+    const en = page.entities;
+    en.emails.forEach(e => addM(emails, e, hostOf(url)));
+    en.phones.forEach(p => addM(phones, p, hostOf(url)));
+    en.socials.forEach(s => { links.set(s, (links.get(s) || new Set()).add(hostOf(url))); });
+    // JSON-LD person data
+    flattenLd(page.jsonld).forEach(person => {
+      addM(names, person.name, `${hostOf(url)} (structured data)`);
+      if (person.address) addM(locations, typeof person.address === 'string' ? person.address : person.address.addressLocality, `${hostOf(url)} (structured data)`);
+      (person.sameAs ? [].concat(person.sameAs) : []).forEach(sa => links.set(sa, (links.get(sa) || new Set()).add(`${hostOf(url)} sameAs`)));
+    });
+    scraped.push({ url, title: page.title, description: page.description, entities: en });
+    emit({ type: 'scraped', url, title: page.title, description: page.description, emails: en.emails.length, phones: en.phones.length, socials: en.socials.length });
+    return page;
+  }, 6, () => { }, cancelled);
+
+  /* -- phase 5: pivot on newly discovered handles -- */
+  const knownHandles = new Set(usernames.map(u => u.toLowerCase()));
+  const newHandles = [...new Set([...links.keys()].map(handleFromUrl).filter(Boolean))]
+    .filter(h => !knownHandles.has(h.toLowerCase())).slice(0, 5);
+  if (newHandles.length && !cancelled()) {
+    emit({ type: 'phase', label: `Pivoting on ${newHandles.length} newly-discovered handle(s)` });
+    newHandles.forEach(h => pivots.push({ kind: 'username', value: h, note: 'discovered in a linked profile' }));
+  }
+
+  const footprint = {
+    identity: { names: mapOut(names), locations: mapOut(locations), emails: mapOut(emails), phones: mapOut(phones) },
+    accounts,
+    links: [...links.entries()].map(([url, via]) => ({ url, via: [...via] })).slice(0, 60),
+    breaches: (ids._emailResult && ids._emailResult.breaches) || [],
+    breachSource: ids._emailResult && ids._emailResult.breachSource,
+    domainIntel: ids._emailResult && ids._emailResult.domainIntel,
+    records: ids._records || null,
+    web: ids._web || [],
+    scraped,
+    pivots,
+    stats: { sourcesChecked, accountsFound: accounts.length, pagesScraped: scraped.length,
+      entities: names.size + locations.size + emails.size + phones.size },
+  };
+  emit({ type: 'done', footprint });
+  return footprint;
+}
+
+function hostOf(url) { try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return url.slice(0, 30); } }
+function flattenLd(arr) {
+  const out = [];
+  const walk = o => {
+    if (!o || typeof o !== 'object') return;
+    if (Array.isArray(o)) return o.forEach(walk);
+    const t = o['@type'];
+    if (t === 'Person' || (Array.isArray(t) && t.includes('Person'))) out.push(o);
+    if (o['@graph']) walk(o['@graph']);
+  };
+  arr.forEach(walk);
+  return out;
+}
+function handleFromUrl(url) {
+  try {
+    const p = new URL(url);
+    const seg = p.pathname.replace(/^\/(in|user|@|u|profile)\/?/i, '/').split('/').filter(Boolean)[0] || '';
+    const h = seg.replace(/^@/, '');
+    return /^[a-zA-Z0-9._-]{3,30}$/.test(h) ? h : null;
+  } catch { return null; }
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
 
   try {
     /* -------- SSE: live username sweep -------- */
+    /* -------- SSE: deep footprint aggregation -------- */
+    if (url.pathname === '/api/footprint/stream' && req.method === 'GET') {
+      const ids = {
+        name: (url.searchParams.get('name') || '').trim().slice(0, 80),
+        city: (url.searchParams.get('city') || '').trim().slice(0, 60),
+        email: (url.searchParams.get('email') || '').trim().slice(0, 120),
+        phone: (url.searchParams.get('phone') || '').trim().slice(0, 30),
+        usernames: (url.searchParams.get('usernames') || '').split(',').map(s => s.trim()).filter(s => /^[\w.@-]{1,64}$/.test(s)).slice(0, 4),
+      };
+      if (!ids.name && !ids.email && !ids.phone && !ids.usernames.length) return json(res, 400, { error: 'provide at least one identifier' });
+      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
+      let closed = false;
+      req.on('close', () => { closed = true; });
+      const emit = obj => { if (!closed) res.write(`data: ${JSON.stringify(obj)}\n\n`); };
+      try { await deepFootprint(ids, emit, () => closed); }
+      catch (e) { emit({ type: 'error', message: e.message }); }
+      return res.end();
+    }
+
     if (url.pathname === '/api/username/stream' && req.method === 'GET') {
       const username = (url.searchParams.get('u') || '').trim();
       const mode = url.searchParams.get('mode') === 'full' ? 'full' : 'quick';
