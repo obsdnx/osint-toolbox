@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FOOTPRINT // Recon Toolbox</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="crt"></div>
+
+<!-- boot sequence -->
+<div id="boot">
+  <pre id="boot-lines"></pre>
+  <div class="boot-skip">[ press any key ]</div>
+</div>
+
+<header>
+<pre class="banner" aria-hidden="true">
+███████╗ ██████╗  ██████╗ ████████╗██████╗ ██████╗ ██╗███╗   ██╗████████╗
+██╔════╝██╔═══██╗██╔═══██╗╚══██╔══╝██╔══██╗██╔══██╗██║████╗  ██║╚══██╔══╝
+█████╗  ██║   ██║██║   ██║   ██║   ██████╔╝██████╔╝██║██╔██╗ ██║   ██║
+██╔══╝  ██║   ██║██║   ██║   ██║   ██╔═══╝ ██╔══██╗██║██║╚██╗██║   ██║
+██║     ╚██████╔╝╚██████╔╝   ██║   ██║     ██║  ██║██║██║ ╚████║   ██║
+╚═╝      ╚═════╝  ╚═════╝    ╚═╝   ╚═╝     ╚═╝  ╚═╝╚═╝╚═╝  ╚═══╝   ╚═╝
+</pre>
+  <div class="tagline">RECON TOOLBOX v2 <span class="cursor">▋</span> know your footprint before someone else does</div>
+  <div class="notice">[ SELF-AUDIT MODE ] scan your own identifiers · everything runs on localhost · authorized use only</div>
+</header>
+
+<nav id="tabs">
+  <button class="tab active" data-tab="email">[ EMAIL ]</button>
+  <button class="tab" data-tab="phone">[ PHONE ]</button>
+  <button class="tab" data-tab="username">[ USERNAME ]</button>
+  <button class="tab" data-tab="password">[ PASSWORD ]</button>
+  <button class="tab" data-tab="card">[ CARD ]</button>
+  <button class="tab" data-tab="self">[ SELF ]</button>
+  <button class="tab" data-tab="profile">[ PROFILE ]</button>
+</nav>
+
+<main>
+  <!-- EMAIL -->
+  <section id="panel-email" class="panel active">
+    <div class="prompt-line">
+      <span class="ps1">root@footprint:~/email$</span>
+      <input id="email-input" type="email" placeholder="you@example.com" autocomplete="off" spellcheck="false">
+      <button class="run" data-run="email">EXECUTE</button>
+    </div>
+    <p class="hint">// Gravatar avatar + full public-profile pivot (name, username, linked accounts from one hash), breach status, public traces</p>
+    <div id="email-out" class="terminal-out"></div>
+  </section>
+
+  <!-- PHONE -->
+  <section id="panel-phone" class="panel">
+    <div class="prompt-line">
+      <span class="ps1">root@footprint:~/phone$</span>
+      <input id="phone-input" type="tel" placeholder="+1 555 867 5309" autocomplete="off" spellcheck="false">
+      <button class="run" data-run="phone">EXECUTE</button>
+    </div>
+    <p class="hint">// number intel, every searchable format, caller-ID exposure, data-broker opt-out campaign tracker</p>
+    <div id="phone-out" class="terminal-out"></div>
+  </section>
+
+  <!-- USERNAME -->
+  <section id="panel-username" class="panel">
+    <div class="prompt-line">
+      <span class="ps1">root@footprint:~/username$</span>
+      <input id="username-input" type="text" placeholder="username or handle" autocomplete="off" spellcheck="false">
+      <label class="modebox"><input type="checkbox" id="username-full"> FULL SWEEP</label>
+      <button class="run" data-run="username">EXECUTE</button>
+    </div>
+    <p class="hint">// QUICK: 15 API-grade probes in seconds. FULL SWEEP: 400+ platforms via the Sherlock DB, streamed live.
+      Every FOUND is verified with a control probe — a random gibberish handle on the same site — so soft-404 sites can't fake a hit.</p>
+    <div id="username-out" class="terminal-out"></div>
+  </section>
+
+  <!-- PASSWORD -->
+  <section id="panel-password" class="panel">
+    <div class="airgap">⛨ K-ANONYMITY PROTOCOL — the password is hashed (SHA-1) in your browser. Only the first 5 hex characters of the hash
+      leave this page; ~800 candidate suffixes come back and matching happens locally. Nobody — including this server — learns your password.</div>
+    <div class="prompt-line">
+      <span class="ps1">root@footprint:~/password$</span>
+      <input id="password-input" type="password" placeholder="password to check against 800M+ leaked credentials" autocomplete="off">
+      <button class="run" data-run="password">CHECK</button>
+    </div>
+    <p class="hint">// checks the HaveIBeenPwned Pwned Passwords corpus (free, no key) without revealing the password — the protocol is printed live so you can audit it</p>
+    <div id="password-out" class="terminal-out"></div>
+  </section>
+
+  <!-- CARD -->
+  <section id="panel-card" class="panel">
+    <div class="airgap">⛨ AIR-GAPPED TOOL — card data is analyzed in your browser only. Nothing is sent to any server, including this one. Refresh wipes it.</div>
+    <div class="prompt-line">
+      <span class="ps1">root@footprint:~/card$</span>
+      <input id="card-input" type="text" inputmode="numeric" placeholder="card number (stays on this machine)" autocomplete="off" spellcheck="false">
+      <button class="run" data-run="card">ANALYZE</button>
+    </div>
+    <p class="hint">// local Luhn + BIN identification, then a guided audit of every place the card is stored — with removal links</p>
+    <div id="card-out" class="terminal-out"></div>
+  </section>
+
+  <!-- SELF (browser audit) -->
+  <section id="panel-self" class="panel">
+    <div class="airgap">⛨ LOCAL AUDIT — fingerprints this browser the way trackers do, entirely on this page. Nothing is transmitted.</div>
+    <div class="prompt-line">
+      <span class="ps1">root@footprint:~/self$</span>
+      <span class="dim" style="flex:1">audit how trackable this browser is right now</span>
+      <button class="run" data-run="self">FINGERPRINT ME</button>
+    </div>
+    <p class="hint">// canvas + WebGL fingerprints, font probing, WebRTC leak test, entropy estimate → trackability score</p>
+    <div id="self-out" class="terminal-out"></div>
+  </section>
+
+  <!-- PROFILE -->
+  <section id="panel-profile" class="panel">
+    <p class="hint">// enter what an adversary might know — all scans run in parallel, then the correlation engine builds the exposure graph, score and playbook</p>
+    <div class="profile-grid">
+      <label>NAME <input id="pf-name" type="text" placeholder="Jane Doe" autocomplete="off"></label>
+      <label>CITY <input id="pf-city" type="text" placeholder="Dar es Salaam" autocomplete="off"></label>
+      <label>USERNAME(S) <input id="pf-usernames" type="text" placeholder="janedoe, jdoe99 (comma-separated)" autocomplete="off"></label>
+      <label>EMAIL <input id="pf-email" type="email" placeholder="you@example.com" autocomplete="off"></label>
+      <label>PHONE <input id="pf-phone" type="tel" placeholder="+1 555 867 5309" autocomplete="off"></label>
+    </div>
+    <button class="run big" data-run="profile">▶ COMPILE EXPOSURE PROFILE</button>
+    <div id="graph-wrap" class="hidden">
+      <div class="graph-title">[ IDENTITY LINK GRAPH ] — how your identifiers connect · drag nodes · click accounts to open</div>
+      <canvas id="graph" width="920" height="420"></canvas>
+    </div>
+    <div id="profile-out" class="terminal-out"></div>
+  </section>
+</main>
+
+<!-- command REPL -->
+<div id="cmdbar">
+  <span class="ps1">cmd&gt;</span>
+  <input id="cmd-input" type="text" placeholder="type 'help' — e.g. user torvalds full · email x@y.com · pw · history" autocomplete="off" spellcheck="false">
+</div>
+
+<footer>
+  <span>FOOTPRINT v2 // localhost:1337 // press <b>/</b> for command mode // self-audit &amp; authorized assessments only</span>
+</footer>
+
+<script src="graph.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
