@@ -37,7 +37,10 @@ function switchTab(name) {
   document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === 'panel-' + name));
 }
 document.querySelectorAll('.tab').forEach(tab =>
-  tab.addEventListener('click', () => switchTab(tab.dataset.tab)));
+  tab.addEventListener('click', () => {
+    switchTab(tab.dataset.tab);
+    if (tab.dataset.tab === 'framework' && typeof renderFramework === 'function') renderFramework();
+  }));
 
 /* -------------------------------------------------------- terminal output */
 
@@ -158,6 +161,26 @@ async function runEmail(targetEl, email) {
     term.line(`[?] breach lookup failed — check ${link('https://haveibeenpwned.com/', 'haveibeenpwned.com')}`, 'warn');
   }
 
+  if (d.accounts && d.accounts.length) {
+    term.line(`\n[ REGISTERED ACCOUNTS — email checked against signup endpoints (Holehe-style) ]`, 'section-h');
+    d.accounts.forEach(a => {
+      if (a.exists === true) term.line(`  [+] ${esc(a.name).padEnd(12)} REGISTERED${a.extra && a.extra.login ? ` as ${esc(a.extra.login)} — ${link(a.extra.url)}` : ''}`, 'bad');
+      else if (a.exists === false) term.line(`  [-] ${esc(a.name).padEnd(12)} not registered`, 'ok');
+      else term.line(`  [?] ${esc(a.name).padEnd(12)} inconclusive`, 'dim');
+    });
+  }
+
+  if (d.reverseImage && d.gravatar) {
+    term.line(`\n[ REVERSE IMAGE — find everywhere your avatar appears ]`, 'section-h');
+    d.reverseImage.forEach(r => term.line(`  → ${link(r.url, r.engine)}`, 'info'));
+  }
+
+  if (d.certSubdomains && d.certSubdomains.length) {
+    term.line(`\n[ CERTIFICATE TRANSPARENCY — hosts on ${esc(d.domain)} (crt.sh) ]`, 'section-h');
+    d.certSubdomains.slice(0, 25).forEach(s => term.line(`  ▸ ${esc(s)}`, 'warn'));
+    if (d.certSubdomains.length > 25) term.line(`  …and ${d.certSubdomains.length - 25} more`, 'dim');
+  }
+
   term.line(`\n[ PUBLIC TRACES — run these searches ]`, 'section-h');
   d.manualChecks.forEach(m => term.line(`  → ${link(m.url, m.name)}`));
 
@@ -200,6 +223,13 @@ async function runPhone(targetEl, phone) {
     if (d.geo.tz) term.line(`  timezone   : ${esc(d.geo.tz)} — narrows your daily activity window`, 'warn');
   }
   if (d.lineType) term.line(`  line type  : ${esc(d.lineType)}`, 'dim');
+  if (d.carrier && d.carrier.valid) {
+    if (d.carrier.carrier) term.line(`  carrier    : ${esc(d.carrier.carrier)}`, 'bad');
+    if (d.carrier.lineType) term.line(`  line (HLR) : ${esc(d.carrier.lineType)}`, 'info');
+    if (d.carrier.location) term.line(`  registered : ${esc(d.carrier.location)}`, 'info');
+  } else if (!d.carrier) {
+    term.line(`  carrier    : (set NUMVERIFY_KEY for live carrier/line-type lookup)`, 'dim');
+  }
   term.line(`  plausible  : ${d.valid ? 'yes' : 'NO — check the number'}`, d.valid ? 'ok' : 'bad');
 
   term.line(`\n[ SEARCHABLE FORMATS ]`, 'section-h');
@@ -1076,6 +1106,34 @@ function wireChips(scope) {
   });
 }
 
+/* ------------------------------------------------ OSINT Framework directory */
+
+function renderFramework() {
+  const out = document.getElementById('framework-out');
+  const rawQ = document.getElementById('fw-query').value.trim();
+  const filter = document.getElementById('fw-filter').value.trim().toLowerCase();
+  const q = encodeURIComponent(rawQ);
+  out.innerHTML = '';
+  const term = makeTerm(out);
+
+  let cats = 0, tools = 0;
+  for (const [category, entries] of Object.entries(OSINT_FRAMEWORK)) {
+    const matching = entries.filter(([n]) => !filter || n.toLowerCase().includes(filter) || category.toLowerCase().includes(filter));
+    if (!matching.length) continue;
+    cats++;
+    term.line(`\n[ ${esc(category.toUpperCase())} ]`, 'section-h');
+    matching.forEach(([nm, tpl]) => {
+      tools++;
+      const needsQ = tpl.includes('{}');
+      const url = needsQ ? tpl.replace('{}', q) : tpl;
+      const tag = needsQ && !rawQ ? ' <span class="dim">(needs target)</span>' : needsQ ? ' <span class="badge v">→ target</span>' : '';
+      term.line(`  → ${link(url, nm)}${tag}`);
+    });
+  }
+  if (!cats) term.line('  no tools match that filter', 'dim');
+  else term.line(`\n[✓] ${tools} tools across ${cats} categories${rawQ ? ` · target "${esc(rawQ)}" injected into query-able tools` : ' · type a target above to inject it'}`, 'ok');
+}
+
 /* --------------------------------------------------------------- history */
 
 async function runHistory(targetEl) {
@@ -1117,8 +1175,15 @@ document.querySelectorAll('button.run').forEach(btn => {
 document.querySelectorAll('main input').forEach(inp => {
   inp.addEventListener('keydown', e => {
     if (e.key !== 'Enter') return;
-    inp.closest('.panel').querySelector('button.run').click();
+    const btn = inp.closest('.panel').querySelector('button.run');
+    if (btn) btn.click();
   });
+});
+
+// framework live filtering / target injection
+['fw-query', 'fw-filter'].forEach(id => {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener('input', () => renderFramework());
 });
 
 /* ----------------------------------------------------------- command REPL */
@@ -1167,6 +1232,7 @@ const COMMANDS = {
   },
   footprint() { switchTab('footprint'); },
   fp() { switchTab('footprint'); },
+  framework(args) { switchTab('framework'); if (args && args[0]) document.getElementById('fw-query').value = args.join(' '); renderFramework(); },
   pw() { switchTab('password'); document.getElementById('password-input').focus(); },
   card(args) { switchTab('card'); if (args[0]) { document.getElementById('card-input').value = args.join(''); RUNNERS.card(); } },
   self() { switchTab('self'); RUNNERS.self(); },

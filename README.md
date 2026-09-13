@@ -28,6 +28,14 @@ Every scraped page and search result is scored 0–100 for how likely it's about
 | **CARD** | **100% in-browser** — the number never hits the network (verify in devtools). Luhn + BIN/network identification, then a guided audit of every place a card is typically stored, with removal links. |
 | **SELF** | Fingerprints this browser the way ad-tech does — canvas + WebGL hashes, font enumeration, WebRTC local-IP leak test, screen/hardware entropy — and computes a **trackability score** (bits of entropy → "1 in N browsers"). Fully local. |
 | **PROFILE** | Runs every scan in parallel, then: computes a 0–100 exposure score, renders a **force-directed identity link graph** (canvas, draggable, click nodes to open), runs a **correlation engine** that explains how the identifiers connect, generates **handle permutations** to scan, builds a Google-dork pack, and exports a printable **dossier**. |
+| **FRAMEWORK** | The full [OSINT Framework](https://osintframework.com/) as a contextual launcher — 140+ tools across 20 categories (username, email, domain, IP, images, social, people-search, phone, public/business records, dark web, geolocation, metadata, threat-intel, crypto, and more). Type a target and it's auto-injected into every query-able tool; filter the tree live. |
+
+**More retrieval tools folded into the tabs above:**
+- **Email → registered accounts** (Holehe-style): checks signup/validation endpoints (Spotify, GitHub, Pinterest, Imgur) to reveal where an email is registered — no login, no mail sent.
+- **Certificate transparency** (crt.sh): custom-domain emails → all subdomains/hosts from public CT logs.
+- **Reverse image search**: your Gravatar/avatar → one-click Yandex/Google Lens/Bing/TinEye lookups.
+- **Phone carrier/line-type** (PhoneInfoga-style): area-code geolocation always; live carrier + line-type with `NUMVERIFY_KEY`.
+- **Property / voter / court dorks** added to the name-recon set.
 
 ### Command REPL
 Press **`/`** anywhere to focus the command bar. `help`, `email x@y.com`, `user torvalds full`, `phone +1…`, `pw`, `self`, `history`, `clear`. Up/down arrows recall history.

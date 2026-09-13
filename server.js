@@ -349,6 +349,9 @@ async function nameRecon(name, city) {
     { label: 'LinkedIn', query: `site:linkedin.com/in "${name}"${loc}` },
     { label: 'Facebook', query: `site:facebook.com "${name}"${loc}` },
     { label: 'People-search brokers', query: `(site:fastpeoplesearch.com OR site:truepeoplesearch.com OR site:spokeo.com OR site:thatsthem.com) "${name}"${loc}` },
+    { label: 'Property records', query: `("${name}"${loc}) ("property records" OR "parcel" OR site:*.assessor.* OR "county assessor" OR site:rehold.com)` },
+    { label: 'Voter records', query: `("${name}"${loc}) (site:voterrecords.com OR "voter registration" OR "registered voter")` },
+    { label: 'Court / legal', query: `("${name}"${loc}) (site:unicourt.com OR site:justia.com OR "case number" OR "v. ${name}")` },
     { label: 'Open web', query: city ? `"${name}" ${city}` : `"${name}"` },
     { label: 'Documents (CV / rosters / PDFs)', query: `"${name}" (resume OR cv OR filetype:pdf)` },
   ];
@@ -1037,6 +1040,77 @@ async function domainIntel(domain) {
   return out;
 }
 
+/* ---------------------------------------- Holehe-style email → accounts ----
+ * Determine which sites an email is REGISTERED on by abusing signup-validation
+ * and account-search endpoints that respond differently for known vs unknown
+ * addresses — without sending a mail or logging in. Extensible: add an entry
+ * with a check() returning {exists:true|false|null, extra?}.
+ */
+const EMAIL_CHECKERS = [
+  { name: 'Spotify', url: e => `https://open.spotify.com/`, check: async email => {
+    const r = await probe(`https://spclient.wg.spotify.com/signup/public/v1/account?validate=1&email=${encodeURIComponent(email)}`, { wantBody: true, timeout: 8000 });
+    if (r.status !== 200) return { exists: null };
+    try { const j = JSON.parse(r.body); return { exists: Boolean(j.errors && j.errors.email && /already/i.test(j.errors.email)) }; }
+    catch { return { exists: null }; }
+  } },
+  { name: 'GitHub', url: e => `https://github.com/search?q=${encodeURIComponent(e)}`, check: async email => {
+    const r = await probe(`https://api.github.com/search/users?q=${encodeURIComponent(email)}+in:email`, { wantBody: true, timeout: 8000 });
+    if (r.status !== 200) return { exists: null };
+    try { const j = JSON.parse(r.body); const u = j.items && j.items[0]; return { exists: (j.total_count || 0) > 0, extra: u ? { login: u.login, url: u.html_url } : null }; }
+    catch { return { exists: null }; }
+  } },
+  { name: 'Pinterest', url: e => 'https://www.pinterest.com/', check: async email => {
+    const r = await probe(`https://www.pinterest.com/resource/EmailExistsResource/get/?data=${encodeURIComponent(JSON.stringify({ options: { email } }))}`, { wantBody: true, timeout: 8000, browser: true });
+    if (r.status !== 200) return { exists: null };
+    try { return { exists: Boolean(JSON.parse(r.body).resource_response.data) }; } catch { return { exists: null }; }
+  } },
+  { name: 'Imgur', url: e => 'https://imgur.com/', check: async email => {
+    const r = await probe(`https://api.imgur.com/account/v1/accounts/available?url=&email=${encodeURIComponent(email)}`, { wantBody: true, timeout: 8000, browser: true });
+    if (r.status !== 200) return { exists: null };
+    try { const j = JSON.parse(r.body); return { exists: j.available === false }; } catch { return { exists: null }; }
+  } },
+];
+
+async function emailAccounts(email) {
+  const results = await Promise.all(EMAIL_CHECKERS.map(async c => {
+    let out;
+    try { out = await c.check(email); } catch { out = { exists: null }; }
+    return { name: c.name, url: c.url(email), exists: out.exists, extra: out.extra || null };
+  }));
+  return results;
+}
+
+/* ------------------------------------- crt.sh certificate transparency ----*/
+// Domain → subdomains/related hosts from public CT logs (crt.sh is flaky, retry).
+async function certTransparency(domain) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const r = await probe(`https://crt.sh/?q=${encodeURIComponent('%.' + domain)}&output=json`, { wantBody: true, timeout: 20000 });
+    if (r.status === 200 && r.body) {
+      try {
+        const rows = JSON.parse(r.body);
+        const names = new Set();
+        rows.forEach(x => String(x.name_value || '').split('\n').forEach(n => { n = n.trim().toLowerCase(); if (n && !n.startsWith('*')) names.add(n); }));
+        return [...names].sort().slice(0, 60);
+      } catch { return []; }
+    }
+    await new Promise(res => setTimeout(res, 1500));
+  }
+  return [];
+}
+
+/* --------------------------------------------- reverse image search --------*/
+// Build reverse-image lookups for a discovered avatar (Gravatar, profile pic).
+// Extracting results needs a JS engine, so these are constructed deep searches.
+function reverseImageSearches(imageUrl) {
+  const u = encodeURIComponent(imageUrl);
+  return [
+    { engine: 'Yandex (best for faces)', url: `https://yandex.com/images/search?rpt=imageview&url=${u}` },
+    { engine: 'Google Lens', url: `https://lens.google.com/uploadbyurl?url=${u}` },
+    { engine: 'Bing Visual Search', url: `https://www.bing.com/images/search?view=detailv2&iss=sbi&q=imgurl:${u}` },
+    { engine: 'TinEye', url: `https://tineye.com/search?url=${u}` },
+  ];
+}
+
 /* ------------------------------------------------------------ email recon */
 
 async function reconEmail(email) {
@@ -1074,13 +1148,14 @@ async function reconEmail(email) {
   // Breaches: prefer HIBP if a key is configured; otherwise use the free,
   // keyless XposedOrNot source so breach data works out of the box.
   let breaches = null, breachSource = null, breachExtra = null;
-  const [hibpRes, xon, webMentions] = await Promise.all([
+  const [hibpRes, xon, webMentions, accounts] = await Promise.all([
     HIBP_KEY
       ? probe(`https://haveibeenpwned.com/api/v3/breachedaccount/${encodeURIComponent(clean)}?truncateResponse=false`,
         { wantBody: true, headers: { 'hibp-api-key': HIBP_KEY } })
       : Promise.resolve(null),
     xonBreaches(clean),
     searchWeb(`"${clean}"`, 5),
+    emailAccounts(clean),
   ]);
   if (hibpRes) {
     if (hibpRes.status === 200) {
@@ -1105,6 +1180,9 @@ async function reconEmail(email) {
     profile,
     breaches, breachSource, breachExtra, hibpEnabled: Boolean(HIBP_KEY),
     webMentions,
+    accounts,
+    reverseImage: gravatar ? reverseImageSearches(`https://gravatar.com/avatar/${md5}?s=400`) : null,
+    certSubdomains: domain_intel.custom ? await certTransparency(domain) : [],
     derivedUsername: localPart.replace(/[+.].*$/, ''),
     domain,
     domainIntel: domain_intel,
@@ -1256,6 +1334,20 @@ const AREA_CODES = {
 const TZ_NAMES = { ET: 'Eastern', CT: 'Central', MT: 'Mountain', PT: 'Pacific', AT: 'Atlantic', NT: 'Newfoundland', AKT: 'Alaska', HT: 'Hawaii' };
 
 const TOLLFREE = new Set(['800', '833', '844', '855', '866', '877', '888']);
+
+// Optional carrier / line-type lookup (PhoneInfoga-style). Free carrier data
+// needs a key; enable with NUMVERIFY_KEY=... (numverify free tier).
+const NUMVERIFY_KEY = process.env.NUMVERIFY_KEY || '';
+async function phoneCarrier(digits) {
+  if (!NUMVERIFY_KEY || !digits) return null;
+  const r = await probe(`http://apilayer.net/api/validate?access_key=${NUMVERIFY_KEY}&number=${digits}`, { wantBody: true, timeout: 8000 });
+  if (r.status !== 200) return null;
+  try {
+    const j = JSON.parse(r.body);
+    if (!j.valid) return { valid: false };
+    return { valid: true, carrier: j.carrier || null, lineType: j.line_type || null, location: j.location || null, countryName: j.country_name || null };
+  } catch { return null; }
+}
 
 function reconPhone(raw) {
   let s = raw.trim().replace(/[^\d+]/g, '');
@@ -1422,7 +1514,15 @@ async function deepFootprint(ids, emit, isCancelled) {
         emit({ type: 'account', platform: 'Gravatar', url: er.profile.profileUrl, handle: ids.email, realName: er.profile.displayName, location: er.profile.location });
       }
       (er.webMentions || []).forEach(w => scrapeTargets.add(w.url));
-      emit({ type: 'email', breaches: (er.breaches || []).length, breachSource: er.breachSource, risk: er.breachExtra && er.breachExtra.risk, domainIntel: er.domainIntel, webMentions: er.webMentions });
+      // email → registered accounts (Holehe-style)
+      (er.accounts || []).filter(a => a.exists === true).forEach(a => {
+        accounts.push({ platform: a.name, url: a.url, source: `email:${ids.email}`, realName: a.extra && a.extra.login || null, location: null, stats: 'registered (email check)' });
+        emit({ type: 'account', platform: a.name, url: (a.extra && a.extra.url) || a.url, handle: ids.email, realName: a.extra && a.extra.login || null });
+      });
+      // cert-transparency subdomains for custom domains
+      (er.certSubdomains || []).forEach(s => links.set('https://' + s, (links.get('https://' + s) || new Set()).add('cert transparency')));
+      if ((er.certSubdomains || []).length) emit({ type: 'note', text: `${er.certSubdomains.length} subdomain(s) found in certificate transparency logs for ${er.domain}` });
+      emit({ type: 'email', breaches: (er.breaches || []).length, breachSource: er.breachSource, risk: er.breachExtra && er.breachExtra.risk, domainIntel: er.domainIntel, webMentions: er.webMentions, accounts: (er.accounts || []).filter(a => a.exists === true).map(a => a.name), certSubdomains: er.certSubdomains });
       ids._emailResult = er;
     } catch { /* best effort */ }
   }
@@ -1694,7 +1794,12 @@ const server = http.createServer(async (req, res) => {
         const p = String(body.phone || '').trim();
         if (!/^[\d\s()+.-]{5,25}$/.test(p)) return json(res, 400, { error: 'invalid phone number' });
         const result = reconPhone(p);
-        result.webMentions = await searchWeb(`"${result.normalized}" OR "${result.variants[1] || result.normalized}"`, 5);
+        const [mentions, carrier] = await Promise.all([
+          searchWeb(`"${result.normalized}" OR "${result.variants[1] || result.normalized}"`, 5),
+          phoneCarrier(result.normalized.replace(/\D/g, '')),
+        ]);
+        result.webMentions = mentions;
+        result.carrier = carrier;
         return json(res, 200, result);
       }
       if (url.pathname === '/api/records') {

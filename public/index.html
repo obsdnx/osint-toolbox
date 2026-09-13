@@ -37,6 +37,7 @@
   <button class="tab" data-tab="card">[ CARD ]</button>
   <button class="tab" data-tab="self">[ SELF ]</button>
   <button class="tab" data-tab="profile">[ PROFILE ]</button>
+  <button class="tab" data-tab="framework">[ FRAMEWORK ]</button>
 </nav>
 
 <main>
@@ -129,6 +130,18 @@
     <div id="self-out" class="terminal-out"></div>
   </section>
 
+  <!-- FRAMEWORK (osintframework.com directory) -->
+  <section id="panel-framework" class="panel">
+    <p class="hint">// the full OSINT Framework (osintframework.com) as a contextual launcher — every category and tool.
+      Type a target below and it's auto-filled into every query-able tool; filter the tree with the search box.</p>
+    <div class="prompt-line">
+      <span class="ps1">root@footprint:~/framework$</span>
+      <input id="fw-query" type="text" placeholder="target to inject (name / email / username / domain / IP…)" autocomplete="off" spellcheck="false">
+      <input id="fw-filter" type="text" placeholder="filter tools…" autocomplete="off" spellcheck="false" style="max-width:180px">
+    </div>
+    <div id="framework-out" class="terminal-out"></div>
+  </section>
+
   <!-- PROFILE -->
   <section id="panel-profile" class="panel">
     <p class="hint">// enter what an adversary might know — all scans run in parallel, then the correlation engine builds the exposure graph, score and playbook</p>
@@ -159,6 +172,7 @@
 </footer>
 
 <script src="graph.js"></script>
+<script src="framework.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
