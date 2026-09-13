@@ -131,9 +131,21 @@ function parseMojeek(body, limit) {
   return out;
 }
 
+function parseStartpage(body, limit) {
+  const out = [];
+  const re = /<a[^>]*class="[^"]*result-(?:title|link)[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)<\/a>/g;
+  let m;
+  while ((m = re.exec(body)) && out.length < limit) {
+    const url = m[1], title = stripHtml(m[2]);
+    if (title && /^https?:/.test(url)) out.push({ title, url, snippet: '' });
+  }
+  return out;
+}
+
 const SEARCH_ENGINES = [
   { name: 'duckduckgo', url: q => `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`, parse: parseDDG },
   { name: 'bing', url: q => `https://www.bing.com/search?q=${encodeURIComponent(q)}&count=20`, parse: parseBing },
+  { name: 'startpage', url: q => `https://www.startpage.com/sp/search?query=${encodeURIComponent(q)}`, parse: parseStartpage },
   { name: 'mojeek', url: q => `https://www.mojeek.com/search?q=${encodeURIComponent(q)}`, parse: parseMojeek },
 ];
 
@@ -186,6 +198,116 @@ function extractEntities(text, baseUrl) {
     handles: [...handles].slice(0, 25),
     socials: [...socials].slice(0, 30),
   };
+}
+
+/* ----------------------------------------- relevance / entity resolution --
+ * Score how likely a piece of content is about THIS specific person, so we can
+ * filter out the noise. Identifiers are weighted by how uniquely they identify
+ * someone (a rare username/email/phone ≫ a common first name), with a
+ * co-occurrence multiplier (matching 2–3 distinct strong identifiers together
+ * is near-certain) and a common-name penalty.
+ */
+const COMMON_NAMES = new Set(['john', 'james', 'robert', 'michael', 'david', 'william', 'mary', 'jennifer',
+  'linda', 'patricia', 'chris', 'chris', 'alex', 'sam', 'daniel', 'paul', 'mark', 'peter', 'anna',
+  'smith', 'johnson', 'williams', 'brown', 'jones', 'garcia', 'miller', 'davis', 'lee', 'wang', 'li',
+  'zhang', 'chen', 'kim', 'singh', 'kumar', 'nguyen', 'martin', 'wilson', 'taylor', 'khan', 'ali']);
+
+function escapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+function profileSignals(p) {
+  const sig = [];
+  const add = (t, w, kind) => { if (t && String(t).trim().length >= 2) sig.push({ t: String(t).toLowerCase().trim(), w, kind }); };
+  if (p.email) { add(p.email, 45, 'email'); add(p.email.split('@')[0], 12, 'email-local'); }
+  (p.usernames || []).forEach(u => add(u, 38, 'username'));
+  if (p.phone) { const d = String(p.phone).replace(/\D/g, ''); if (d.length >= 7) add(d.slice(-10), 40, 'phone'); }
+  if (p.name) {
+    add(p.name, 26, 'fullname');
+    p.name.toLowerCase().split(/\s+/).filter(Boolean).forEach(pt =>
+      add(pt, COMMON_NAMES.has(pt) ? 3 : 12, 'namepart'));
+  }
+  if (p.city) add(p.city, 9, 'city');
+  if (p.employer) add(p.employer, 16, 'employer');
+  return sig;
+}
+
+function scoreRelevance(text, sig) {
+  const hay = ' ' + String(text || '').toLowerCase().replace(/\s+/g, ' ') + ' ';
+  let raw = 0; const matched = []; const kinds = new Set();
+  for (const s of sig) {
+    const found = s.t.length <= 4 ? new RegExp('\\b' + escapeRe(s.t) + '\\b').test(hay) : hay.includes(s.t);
+    if (found) { raw += s.w; matched.push(s.t); kinds.add(s.kind); }
+  }
+  const strong = [...kinds].filter(k => ['email', 'username', 'phone', 'fullname', 'employer'].includes(k)).length;
+  if (strong >= 2) raw *= 1.4;
+  if (strong >= 3) raw *= 1.3;
+  if (kinds.has('namepart') && kinds.has('city')) raw += 10;
+  const score = Math.max(0, Math.min(100, Math.round(raw)));
+  return { score, matched: [...new Set(matched)], tier: score >= 60 ? 'HIGH' : score >= 30 ? 'MEDIUM' : score >= 12 ? 'LOW' : 'DISCARD' };
+}
+
+// Go through search results one by one: fetch each page, extract its content,
+// and score how likely it's about the target. Returns results ranked by score.
+async function deepSearch(query, sig, limit = 6) {
+  const results = await searchWeb(query, limit);
+  const scored = [];
+  for (const r of results) {
+    const page = await scrapePage(r.url);
+    const text = [r.title, r.snippet, page.ok ? page.title : '', page.ok ? page.description : '', page.ok ? page.textSample : ''].join(' ');
+    const rel = scoreRelevance(text, sig);
+    scored.push({ title: r.title, url: r.url, snippet: r.snippet, engine: r.engine, ...rel, entities: page.ok ? page.entities : null });
+  }
+  return scored.sort((a, b) => b.score - a.score);
+}
+
+/* ------------------------------------------------ dark web (Ahmia + Tor) --*/
+// Ahmia indexes .onion sites and is reachable over clearnet — search dark-web
+// mentions of an identifier WITHOUT running Tor.
+async function ahmiaSearch(query) {
+  const r = await probe(`https://ahmia.fi/search/?q=${encodeURIComponent(query)}`, { wantBody: true, browser: true, redirect: 'follow', timeout: 15000 });
+  if (r.status !== 200 || !r.body) return [];
+  const out = [];
+  const re = /<li class="result"[\s\S]*?<h4>\s*<a href="([^"]+)"[^>]*>(.*?)<\/a>[\s\S]*?(?:<p>(.*?)<\/p>)?/g;
+  let m;
+  while ((m = re.exec(r.body)) && out.length < 10) {
+    let onion = m[1];
+    const rd = onion.match(/redirect_url=([^&"]+)/);
+    if (rd) { try { onion = decodeURIComponent(rd[1]); } catch { /* keep */ } }
+    out.push({ title: stripHtml(m[2]), onion: onion.slice(0, 120), snippet: stripHtml(m[3] || '') });
+  }
+  return out;
+}
+
+// Optional: fetch an .onion page through a locally-running Tor daemon using the
+// system curl's SOCKS5h support (keeps this project dependency-free). Enable by
+// running Tor (SOCKS on 127.0.0.1:9050) and setting TOR=1.
+const TOR_ENABLED = process.env.TOR === '1' || process.env.TOR === 'true';
+const TOR_SOCKS = process.env.TOR_SOCKS || '127.0.0.1:9050';
+function torFetch(url) {
+  return new Promise(resolve => {
+    if (!TOR_ENABLED) return resolve({ ok: false, reason: 'Tor disabled (set TOR=1 and run the Tor daemon)' });
+    const { execFile } = require('child_process');
+    execFile('curl', ['-s', '--max-time', '30', '--socks5-hostname', TOR_SOCKS, url],
+      { maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => {
+        if (err) return resolve({ ok: false, reason: 'curl/tor error: ' + err.message.slice(0, 80) });
+        resolve({ ok: true, body: stdout });
+      });
+  });
+}
+
+/* ------------------------------------------------ Wayback Machine ----------*/
+// Archived / deleted versions — what USED to be public about you.
+async function waybackHistory(url) {
+  const r = await probe(`https://web.archive.org/cdx/search/cdx?url=${encodeURIComponent(url)}&output=json&limit=6&collapse=timestamp:6&fl=timestamp,original,statuscode`, { wantBody: true, timeout: 10000 });
+  if (r.status !== 200) return null;
+  try {
+    const rows = JSON.parse(r.body);
+    if (!rows || rows.length < 2) return null;
+    const items = rows.slice(1).map(([ts, orig]) => ({
+      date: `${ts.slice(0, 4)}-${ts.slice(4, 6)}-${ts.slice(6, 8)}`,
+      snapshot: `https://web.archive.org/web/${ts}/${orig}`,
+    }));
+    return { count: items.length, first: items[0], items };
+  } catch { return null; }
 }
 
 // Fetch a page (or its underlying JSON endpoint) and pull structured facts +
@@ -1262,6 +1384,9 @@ async function deepFootprint(ids, emit, isCancelled) {
   if (ids.name) addM(names, ids.name, 'you provided');
   if (ids.city) addM(locations, ids.city, 'you provided');
 
+  // Relevance model — used to filter out results/pages that aren't about you.
+  const sig = profileSignals({ name: ids.name, city: ids.city, email: ids.email, phone: ids.phone, usernames, employer: ids.employer });
+
   let sourcesChecked = 0;
   const scrapeTargets = new Set();
 
@@ -1318,25 +1443,74 @@ async function deepFootprint(ids, emit, isCancelled) {
   /* -- phase 4: SCRAPE discovered pages, extract entities -- */
   const targets = [...scrapeTargets].filter(u => /^https?:/.test(u)).slice(0, 30);
   emit({ type: 'phase', label: `Fetching & extracting data from ${targets.length} discovered pages` });
+  let filteredOut = 0;
   await runPool(targets, async url => {
     if (cancelled()) return null;
     const page = await scrapePage(url);
     sourcesChecked++;
     if (!page.ok) return null;
+    // Relevance gate: does this page actually appear to be about the target?
+    const text = [page.title, page.description, page.textSample].join(' ');
+    const rel = scoreRelevance(text, sig);
     const en = page.entities;
-    en.emails.forEach(e => addM(emails, e, hostOf(url)));
-    en.phones.forEach(p => addM(phones, p, hostOf(url)));
-    en.socials.forEach(s => { links.set(s, (links.get(s) || new Set()).add(hostOf(url))); });
-    // JSON-LD person data
-    flattenLd(page.jsonld).forEach(person => {
-      addM(names, person.name, `${hostOf(url)} (structured data)`);
-      if (person.address) addM(locations, typeof person.address === 'string' ? person.address : person.address.addressLocality, `${hostOf(url)} (structured data)`);
-      (person.sameAs ? [].concat(person.sameAs) : []).forEach(sa => links.set(sa, (links.get(sa) || new Set()).add(`${hostOf(url)} sameAs`)));
-    });
-    scraped.push({ url, title: page.title, description: page.description, entities: en });
-    emit({ type: 'scraped', url, title: page.title, description: page.description, emails: en.emails.length, phones: en.phones.length, socials: en.socials.length });
+    // Only merge extracted PII into the dossier when the page is plausibly you
+    // (or when we have too few signals to judge). Otherwise it's someone else.
+    const trust = sig.length === 0 || rel.tier === 'HIGH' || rel.tier === 'MEDIUM';
+    if (trust) {
+      en.emails.forEach(e => addM(emails, e, hostOf(url)));
+      en.phones.forEach(p => addM(phones, p, hostOf(url)));
+      en.socials.forEach(s => { links.set(s, (links.get(s) || new Set()).add(hostOf(url))); });
+      flattenLd(page.jsonld).forEach(person => {
+        addM(names, person.name, `${hostOf(url)} (structured data)`);
+        if (person.address) addM(locations, typeof person.address === 'string' ? person.address : person.address.addressLocality, `${hostOf(url)} (structured data)`);
+        (person.sameAs ? [].concat(person.sameAs) : []).forEach(sa => links.set(sa, (links.get(sa) || new Set()).add(`${hostOf(url)} sameAs`)));
+      });
+    } else {
+      filteredOut++;
+    }
+    scraped.push({ url, title: page.title, description: page.description, entities: en, relevance: rel, merged: trust });
+    emit({ type: 'scraped', url, title: page.title, tier: rel.tier, score: rel.score, matched: rel.matched, merged: trust, emails: en.emails.length, phones: en.phones.length, socials: en.socials.length });
     return page;
   }, 6, () => { }, cancelled);
+  if (filteredOut) emit({ type: 'note', text: `filtered out ${filteredOut} page(s) that scored too low to be about you` });
+
+  /* -- phase 4b: dark-web mentions (Ahmia, clearnet — no Tor required) -- */
+  const darkweb = [];
+  if (!cancelled()) {
+    emit({ type: 'phase', label: 'Searching dark-web index (Ahmia) for mentions' });
+    const dwQueries = [ids.email, ...usernames.slice(0, 2), ids.name].filter(Boolean).slice(0, 3);
+    for (const q of dwQueries) {
+      if (cancelled()) break;
+      try {
+        const hits = await ahmiaSearch(q);
+        sourcesChecked++;
+        hits.forEach(h => {
+          const rel = scoreRelevance(`${h.title} ${h.snippet}`, sig);
+          if (sig.length === 0 || rel.tier !== 'DISCARD') {
+            darkweb.push({ ...h, query: q, tier: rel.tier, score: rel.score });
+            emit({ type: 'darkweb', query: q, title: h.title, onion: h.onion, tier: rel.tier });
+          }
+        });
+      } catch { /* best effort */ }
+    }
+    if (TOR_ENABLED) emit({ type: 'note', text: 'Tor enabled — .onion pages will be fetched via SOCKS' });
+  }
+
+  /* -- phase 4c: Wayback Machine (deleted/archived versions) -- */
+  const archived = [];
+  if (!cancelled()) {
+    emit({ type: 'phase', label: 'Checking Wayback Machine for archived/deleted versions' });
+    const waybackTargets = [...accounts.map(a => a.url), ...[...links.keys()]].filter(Boolean).slice(0, 8);
+    await runPool(waybackTargets, async u => {
+      if (cancelled()) return;
+      const wb = await waybackHistory(u);
+      sourcesChecked++;
+      if (wb && wb.count) {
+        archived.push({ url: u, ...wb });
+        emit({ type: 'archived', url: u, count: wb.count, first: wb.first });
+      }
+    }, 4, () => { }, cancelled);
+  }
 
   /* -- phase 5: pivot on newly discovered handles -- */
   const knownHandles = new Set(usernames.map(u => u.toLowerCase()));
@@ -1357,8 +1531,11 @@ async function deepFootprint(ids, emit, isCancelled) {
     records: ids._records || null,
     web: ids._web || [],
     scraped,
+    darkweb,
+    archived,
     pivots,
     stats: { sourcesChecked, accountsFound: accounts.length, pagesScraped: scraped.length,
+      darkwebHits: darkweb.length, archivedPages: archived.length,
       entities: names.size + locations.size + emails.size + phones.size },
   };
   emit({ type: 'done', footprint });
@@ -1399,6 +1576,7 @@ const server = http.createServer(async (req, res) => {
         city: (url.searchParams.get('city') || '').trim().slice(0, 60),
         email: (url.searchParams.get('email') || '').trim().slice(0, 120),
         phone: (url.searchParams.get('phone') || '').trim().slice(0, 30),
+        employer: (url.searchParams.get('employer') || '').trim().slice(0, 80),
         usernames: (url.searchParams.get('usernames') || '').split(',').map(s => s.trim()).filter(s => /^[\w.@-]{1,64}$/.test(s)).slice(0, 4),
       };
       if (!ids.name && !ids.email && !ids.phone && !ids.usernames.length) return json(res, 400, { error: 'provide at least one identifier' });

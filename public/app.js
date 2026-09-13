@@ -866,15 +866,15 @@ function runFootprint(targetEl) {
     const usernames = document.getElementById('fp-usernames').value.trim();
     const email = document.getElementById('fp-email').value.trim();
     const phone = document.getElementById('fp-phone').value.trim();
+    const employer = document.getElementById('fp-employer').value.trim();
     const term = makeTerm(targetEl);
     document.getElementById('graph-wrap') && document.getElementById('graph-wrap').classList.add('hidden');
 
     if (!name && !usernames && !email && !phone) { term.line('[!] enter at least one identifier', 'bad'); return resolve(); }
     header(term, 'MAPPING DIGITAL FOOTPRINT');
-    term.line('[*] running every source, then fetching & scraping the pages they surface...', 'dim');
-    const log = term.line('', 'info');
+    term.line('[*] running every source, scraping each page, and scoring how likely each result is actually you...', 'dim');
 
-    const qs = new URLSearchParams({ name, city, email, phone, usernames });
+    const qs = new URLSearchParams({ name, city, email, phone, employer, usernames });
     const es = new EventSource('/api/footprint/stream?' + qs.toString());
     let liveAccounts = 0, liveScraped = 0;
 
@@ -892,9 +892,20 @@ function runFootprint(targetEl) {
       } else if (m.type === 'scraped') {
         liveScraped++;
         const hit = (m.emails || 0) + (m.phones || 0) + (m.socials || 0);
-        term.line(`  [~] scraped ${esc(hostname(m.url)).padEnd(24)} ${hit ? `<span class="warn">extracted ${m.emails}✉ ${m.phones}☎ ${m.socials}🔗</span>` : '<span class="dim">no entities</span>'}`, 'dim');
+        const tierCls = m.tier === 'HIGH' ? 'bad' : m.tier === 'MEDIUM' ? 'warn' : 'dim';
+        const tierTag = m.tier ? `<span class="badge ${m.tier === 'HIGH' ? 'v' : 'u'}">${esc(m.tier)} ${m.score}</span>` : '';
+        const status = m.merged === false
+          ? '<span class="dim">← not you, discarded</span>'
+          : (hit ? `<span class="warn">extracted ${m.emails}✉ ${m.phones}☎ ${m.socials}🔗</span>` : '<span class="dim">no entities</span>');
+        term.line(`  [~] ${esc(hostname(m.url)).padEnd(26)} ${tierTag} ${status}${m.matched && m.matched.length ? ` <span class="dim">matched: ${esc(m.matched.slice(0, 3).join(', '))}</span>` : ''}`, tierCls);
+      } else if (m.type === 'darkweb') {
+        term.line(`  [☠] dark-web hit (${esc(m.tier || '?')}) "${esc(m.title || 'untitled')}" <span class="dim">${esc((m.onion || '').slice(0, 60))}</span>`, m.tier === 'HIGH' ? 'bad' : 'warn');
+      } else if (m.type === 'archived') {
+        term.line(`  [◷] ${esc(hostname(m.url))} — ${m.count} archived snapshot(s), oldest ${esc(m.first ? m.first.date : '?')} ${m.first ? link(m.first.snapshot, 'view') : ''}`, 'warn');
       } else if (m.type === 'records') {
         renderRecords(term, m.records, m.web);
+      } else if (m.type === 'note') {
+        term.line(`  [i] ${esc(m.text)}`, 'dim');
       } else if (m.type === 'error') {
         term.line(`  [!] ${esc(m.message)}`, 'bad');
       } else if (m.type === 'done') {
@@ -942,7 +953,7 @@ function renderFootprint(term, f) {
   term.line(`\n╔══════════════════════════════════════════════╗`, 'ok');
   term.line(`║  CONSOLIDATED FOOTPRINT DOSSIER               ║`, 'ok');
   term.line(`╚══════════════════════════════════════════════╝`, 'ok');
-  term.line(`  ${f.stats.sourcesChecked} sources checked · ${f.stats.accountsFound} accounts · ${f.stats.pagesScraped} pages scraped · ${f.stats.entities} distinct data points\n`, 'dim');
+  term.line(`  ${f.stats.sourcesChecked} sources checked · ${f.stats.accountsFound} accounts · ${f.stats.pagesScraped} pages scraped · ${f.stats.darkwebHits || 0} dark-web · ${f.stats.archivedPages || 0} archived · ${f.stats.entities} distinct data points\n`, 'dim');
 
   const idBlock = (label, arr, cls) => {
     if (!arr || !arr.length) return;
@@ -972,6 +983,18 @@ function renderFootprint(term, f) {
   if (f.links && f.links.length) {
     term.line(`\n[ LINKED / DISCOVERED PROFILES: ${f.links.length} ]`, 'section-h');
     f.links.slice(0, 25).forEach(l => term.line(`  → ${link(l.url)} <span class="dim">(via ${esc(l.via.slice(0, 2).join(', '))})</span>`, 'warn'));
+  }
+
+  if (f.darkweb && f.darkweb.length) {
+    term.line(`\n[ DARK-WEB MENTIONS: ${f.darkweb.length} (Ahmia index) ]`, 'section-h');
+    f.darkweb.slice(0, 12).forEach(d => term.line(`  ☠ [${esc(d.tier)}] ${esc(d.title || 'untitled')} <span class="dim">${esc((d.onion || '').slice(0, 55))} · q:"${esc(d.query)}"</span>`, d.tier === 'HIGH' ? 'bad' : 'warn'));
+    term.line(`  ⚠ these are indexed .onion pages — enable Tor (TOR=1) to fetch their contents`, 'dim');
+  }
+
+  if (f.archived && f.archived.length) {
+    term.line(`\n[ ARCHIVED / DELETED (Wayback Machine): ${f.archived.length} ]`, 'section-h');
+    f.archived.forEach(a => term.line(`  ◷ ${esc(hostname(a.url))} — ${a.count} snapshot(s) back to ${esc(a.first ? a.first.date : '?')} ${a.first ? link(a.first.snapshot, 'oldest') : ''}`, 'warn'));
+    term.line(`  ↑ content deleted from the live site may still be readable here`, 'dim');
   }
 
   if (f.pivots && f.pivots.length) {
